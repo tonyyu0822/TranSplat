@@ -169,6 +169,18 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
     except:
         pcd = None
 
+    if pcd is None or pcd.points.shape[0] == 0:
+        num_pts = 100_000
+        print(f"[ WARNING ] Empty or missing point cloud. Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the scene
+        center = nerf_normalization["translate"]
+        radius = nerf_normalization["radius"]
+        xyz = np.random.random((num_pts, 3)) * (2 * radius) - radius - center
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+        storePly(ply_path, xyz, SH2RGB(shs) * 255) # Gen by Cursor
+
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
                            test_cameras=test_cam_infos,
