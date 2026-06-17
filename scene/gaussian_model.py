@@ -11,6 +11,7 @@
 
 import torch
 import numpy as np
+import torch.nn.functional as F
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
 import os
@@ -20,6 +21,9 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from utils.lighting_utils import (
+    C0, LAMBERT_A_L_16, evaluate_sh_bases, linear_to_srgb, srgb_to_linear
+)
 
 class GaussianModel:
 
@@ -43,7 +47,7 @@ class GaussianModel:
 
     def __init__(self, sh_degree : int):
         self.active_sh_degree = 0
-        self.max_sh_degree = sh_degree  
+        self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -57,6 +61,14 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
+
+        # Physical DC decomposition: dc = albedo × E_src(normal, source_sh)
+        self._use_physical_dc = False
+        self._source_sh = torch.empty(0)          # [K, 3]  global lighting SH
+        self._albedo_init = None                  # [N, 3]  frozen reference for stability loss
+        self.light_optimizer = None               # separate Adam for _source_sh
+        self._lambert_al = LAMBERT_A_L_16.cuda()  # [K] fixed kernel
+        self.C0 = C0
 
     def capture(self):
         return (
@@ -105,10 +117,38 @@ class GaussianModel:
         return self._xyz
     
     @property
+    def get_normal(self):
+        """Per-Gaussian world-space normal: local z-axis of the rotation frame."""
+        return build_rotation(self._rotation)[:, :, 2]  # [N, 3]
+
+    @property
+    def get_albedo_colors(self):
+        """Decode _features_dc as sRGB albedo [N, 3] when physical DC is active."""
+        return (self.C0 * self._features_dc[:, 0, :] + 0.5).clamp(0.0, 1.0)
+
+    @property
     def get_features(self):
-        features_dc = self._features_dc
-        features_rest = self._features_rest
-        return torch.cat((features_dc, features_rest), dim=1)
+        if not self._use_physical_dc:
+            return torch.cat((self._features_dc, self._features_rest), dim=1)
+
+        # Decode _features_dc as albedo (sRGB [0,1])
+        albedo = self.get_albedo_colors                   # [N, 3]
+
+        # Compute per-Gaussian irradiance from source_sh and normals
+        n = F.normalize(self.get_normal, dim=1)           # [N, 3]
+        n_sh = n.clone(); n_sh[:, 0] = -n_sh[:, 0]       # x-flip: world→SH convention
+        K  = self._source_sh.shape[0]
+        al = self._lambert_al[:K]
+        Y     = evaluate_sh_bases(n_sh, self.max_sh_degree)   # [N, K]
+        E_src = (Y * al.view(1, -1)) @ self._source_sh        # [N, 3]
+        E_src = E_src.clamp(min=1e-4)
+
+        # Synthesise DC: albedo × irradiance → sRGB → SH encoding
+        dc_linear = srgb_to_linear(albedo) * E_src
+        dc_srgb   = linear_to_srgb(dc_linear)
+        dc_sh     = ((dc_srgb - 0.5) / self.C0).unsqueeze(1)  # [N, 1, 3]
+
+        return torch.cat((dc_sh, self._features_rest), dim=1)
     
     @property
     def get_opacity(self):
@@ -210,6 +250,40 @@ class GaussianModel:
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
+
+    def enable_physical_dc(self, albedo_init_srgb: torch.Tensor,
+                           source_sh_init: torch.Tensor,
+                           source_sh_lr: float = 1e-3):
+        """Switch _features_dc to encode albedo; set up source_sh.
+        albedo_init_srgb: [N, 3] sRGB in [0, 1]
+        source_sh_init:   [K, 3]
+        """
+        N = self._features_dc.shape[0]
+        # Encode albedo as SH DC: value = (albedo - 0.5) / C0  → [N, 1, 3]
+        albedo_sh = ((albedo_init_srgb.cuda() - 0.5) / self.C0).unsqueeze(1)
+        tensors = self.replace_tensor_to_optimizer(albedo_sh, "f_dc")
+        self._features_dc = tensors["f_dc"]
+        self._features_dc.requires_grad_(False)   # frozen until unfreeze_albedo()
+
+        self._albedo_init = albedo_init_srgb.detach().cuda().clamp(0, 1)
+
+        K = source_sh_init.shape[0]
+        self._lambert_al = LAMBERT_A_L_16[:K].cuda()
+        self._source_sh  = nn.Parameter(source_sh_init.cuda().float())
+        self.light_optimizer = torch.optim.Adam(
+            [self._source_sh], lr=source_sh_lr, eps=1e-15
+        )
+        self._use_physical_dc = True
+        print(f"[PhysicalDC] enabled. albedo_mean={albedo_init_srgb.mean():.3f}  "
+              f"source_sh L00={source_sh_init[0].tolist()}")
+
+    def unfreeze_albedo(self, lr: float = 5e-5):
+        """Allow _features_dc (albedo) to be trained after initial source_sh burn-in."""
+        self._features_dc.requires_grad_(True)
+        for g in self.optimizer.param_groups:
+            if g["name"] == "f_dc":
+                g["lr"] = lr
+        print(f"[PhysicalDC] albedo unfrozen, lr={lr}")
 
     def load_ply(self, path):
         plydata = PlyData.read(path)
