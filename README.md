@@ -1,12 +1,18 @@
+<p align="center">
+  <img src="assets/logo.png" alt="TranSplat" width="360">
+</p>
+
 # TranSplat: Instant Cross-Scene Object Relighting in Gaussian Splatting via Spherical Harmonic Transfer
+
+<p align="center"><b>ICCP 2026</b></p>
 
 [Project Page](https://tonyyu0822.github.io/transplat/) | [Paper](https://arxiv.org/abs/2503.22676) | [arXiv](https://arxiv.org/abs/2503.22676) | [2D Gaussian Splatting (base)](https://github.com/hbb1/2d-gaussian-splatting) <br>
 
-![Teaser: rotating-envmap relighting comparison](assets/teaser.gif)
+![Teaser: before/after TranSplat relighting on the bonsai and vase scenes](assets/teaser.gif)
 
 This repo contains the official implementation for **TranSplat**, a method for instant, accurate object relighting within the Gaussian Splatting (GS) framework. Rather than relying on costly inverse-rendering routines, TranSplat is a BRDF-free radiance transfer strategy that analytically modulates the spherical harmonic (SH) appearance coefficients of an object's 2D Gaussian surfels using per-normal irradiance ratios derived from source and target environment maps. A specularity-aware dual-path SH transfer strategy adapts higher-order SH bands in the reflection domain for view-dependent, glossy appearance, and a lightweight SH-domain self-shadowing module produces physically realistic occlusion without explicit mesh raycasting. TranSplat is a post-processing step — it requires no additional GS retraining per source/target scene pair, and it relights in well under one second.
 
-Built on top of [2D Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting), which represents a scene as a set of 2D oriented disks (surfels) rasterized with perspective-correct differentiable rasterization.
+Built on top of [2D Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting), which represents a scene as a set of 2D oriented disks (surfels) rasterized with perspective-correct differentiable rasterization. **The core of TranSplat is a single, self-contained file — [`radiance_transfer_TranSplat.py`](radiance_transfer_TranSplat.py)** — everything else in this repo is the (largely unmodified) 2DGS training/rendering pipeline plus a few diagnostic/demo scripts around it.
 
 ## ⭐ News
 - 2026/07/17: Initial public code release, alongside the [project page](https://tonyyu0822.github.io/transplat/).
@@ -28,8 +34,9 @@ We are packaging the interactive GUI shown below — real-time source/target env
 git clone --recursive https://github.com/tonyyu0822/TranSplat.git
 cd TranSplat
 
-# if you have an environment used for 3DGS/2DGS, you can reuse it;
-# otherwise create a fresh one
+# if you already have a working 2D Gaussian Splatting conda environment,
+# just activate that one and skip straight to `pip install` below —
+# TranSplat adds no new dependencies on top of 2DGS.
 conda env create --file environment.yml
 conda activate surfel_splatting
 pip install submodules/diff-surfel-rasterization
@@ -63,6 +70,8 @@ python train.py -s <dataset> -m <output dir> \
     --sh_degree 5 --sh_degree_up_interval 3000 \
     --lambda_normal 0.05 --lambda_dist 0.0
 ```
+**Trade-off:** increasing `--sh_degree` improves relight quality — especially specular highlights — since TranSplat's specular transfer operates directly on the higher-order SH bands, but it also increases per-Gaussian storage and rendering cost, lowering FPS. See the paper for a detailed quality/speed analysis.
+
 The rest of the physically-based DC/albedo prior schedule (used to keep SH coefficients shadow-free and relight-ready) is controlled by constants near the top of `train.py` for advanced tuning.
 
 ## Relighting
@@ -82,7 +91,16 @@ scripts/run_transplat.sh relight --ply <point_cloud.ply> --source-env <source.hd
 
 Useful flags: `--floor_alpha` (diffuse denominator floor), `--tau_max` (diffuse transfer clamp), `--specular_boost` (scale for L≥1 SH rest bands), `--num_samples`/`--shadow_res` (self-shadow bake quality/cost trade-off).
 
-![Spatially-varying relighting demo](assets/relighting_demo.gif)
+<table>
+<tr>
+<td width="50%"><img src="assets/relight_multienv_loop.gif" alt="TranSplat relighting the same object across several environment maps"></td>
+<td width="50%"><img src="assets/rotating_light_comparison.gif" alt="Spatially-varying shadows and relighting as the target environment map rotates"></td>
+</tr>
+<tr>
+<td align="center">Relighting across multiple target environment maps</td>
+<td align="center">Spatially-varying shadows &amp; relighting under a rotating light</td>
+</tr>
+</table>
 
 ## Rendering / Mesh Extraction
 
@@ -134,7 +152,7 @@ Two additional scripts, also reachable through `run_transplat.sh`:
   ```bash
   scripts/run_transplat.sh visibility --dataset <dataset> --model <model dir>
   ```
-- **Rotating-envmap demo** — bakes visibility once, then relights and renders fixed camera views while the target environment map rotates around the object, encoding the result as an MP4 (this is what produced the teaser GIF above).
+- **Rotating-envmap demo** — bakes visibility once, then relights and renders fixed camera views while the target environment map rotates around the object, encoding the result as an MP4 (this is what produced the "rotating light" comparison GIF in the [Relighting](#relighting) section above).
   ```bash
   scripts/run_transplat.sh demo --dataset <dataset> --model <model dir> --source-env <src.hdr> --target-env <tgt.hdr>
   ```
