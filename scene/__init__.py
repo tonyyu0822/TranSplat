@@ -74,13 +74,17 @@ class Scene:
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
         
-        if self.loaded_iter:
+        if getattr(args, "ply", None):
+            # Explicit --ply always wins, e.g. to render a relit point cloud
+            # produced by radiance_transfer_TranSplat.py instead of the
+            # trained iteration's point_cloud.ply. getattr guards callers
+            # (e.g. scripts/ helpers) whose args Namespace has no ply field.
+            self.gaussians.load_ply(args.ply)
+        elif self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
-        elif args.ply:
-            self.gaussians.load_ply(args.ply)
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 

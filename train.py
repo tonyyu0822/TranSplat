@@ -57,7 +57,7 @@ PSNR_WARN_THRESH    = 27.0
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations,
-             checkpoint_iterations, checkpoint):
+             checkpoint_iterations, checkpoint, sh_degree_up_interval=1000):
     first_iter = 0
     tb_writer  = prepare_output_and_logger(dataset)
     gaussians  = GaussianModel(dataset.sh_degree)
@@ -90,7 +90,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
         iter_start.record()
         gaussians.update_learning_rate(iteration)
 
-        if iteration % 1000 == 0:
+        if iteration % sh_degree_up_interval == 0:
             gaussians.oneupSHdegree()
 
         # ── Pick a random camera ──────────────────────────────────────────────
@@ -385,6 +385,8 @@ if __name__ == "__main__":
     parser.add_argument("--quiet",                 action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint",      type=str,  default=None)
+    parser.add_argument("--sh_degree_up_interval", type=int,  default=1000,
+                        help="Increase active SH degree by 1 every N iterations (default: 1000)")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -393,5 +395,6 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args),
              args.test_iterations, args.save_iterations,
-             args.checkpoint_iterations, args.start_checkpoint)
+             args.checkpoint_iterations, args.start_checkpoint,
+             args.sh_degree_up_interval)
     print("\nTraining complete.")

@@ -22,11 +22,15 @@ C4 = [2.5033429417967046, -1.7701307697799304, 0.9461746957575601, -0.6690465435
 
 # ============================================================================
 # Configuration: File Paths
+#
+# All paths below are supplied via CLI (--source/--target/--ply/--output);
+# there are no built-in defaults so the script has no dependency on any
+# particular machine's directory layout.
 # ============================================================================
-ENV_MAP_SOURCE_PATH = '/scratch/shared/by12/Transplat/envmap/city.hdr'
-ENV_MAP_TARGET_PATH = '/scratch/shared/by12/Transplat/envmap/px.hdr'
-OBJECT_PATH = '/scratch/shared/by12/Transplat/code/2dgs_viewer/2d-gaussian-splatting/output/armadillo_vanilla/point_cloud/iteration_30000/point_cloud.ply'
-RELIGHT_OUTPUT_PATH = "/scratch/shared/by12/Transplat/code/2dgs_viewer/2d-gaussian-splatting/output/armadillo_vanilla/point_cloud/iteration_30000/city2px_point_cloud.ply"
+ENV_MAP_SOURCE_PATH = None
+ENV_MAP_TARGET_PATH = None
+OBJECT_PATH = None
+RELIGHT_OUTPUT_PATH = None
 
 # ============================================================================
 # 2DGS Mock Classes & Camera Helpers
@@ -443,13 +447,15 @@ def phase_2_decoupled_relight(object_gaussians, all_normals, V_lm, L_lm_source, 
 # ============================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Radiance transfer with self-shadowing (SH Convolution)")
-    parser.add_argument("--source", default=ENV_MAP_SOURCE_PATH, help="Source HDR env map path")
-    parser.add_argument("--target", default=ENV_MAP_TARGET_PATH, help="Target HDR env map path")
-    parser.add_argument("--ply",    default=OBJECT_PATH,         help="Input Gaussian PLY path")
-    parser.add_argument("--output", default=RELIGHT_OUTPUT_PATH, help="Output relit PLY path")
+    parser.add_argument("--source", required=True, help="Source HDR env map path")
+    parser.add_argument("--target", required=True, help="Target HDR env map path")
+    parser.add_argument("--ply",    required=True, help="Input Gaussian PLY path")
+    parser.add_argument("--output", required=True, help="Output relit PLY path")
     parser.add_argument("--floor_alpha", type=float, default=0.05, help="Fraction of unoccluded irradiance used as diffuse denominator floor")
     parser.add_argument("--tau_max",     type=float, default=3.0,  help="Hard clamp on diffuse transfer ratio tau_diffuse")
     parser.add_argument("--specular_boost", type=float, default=1.0, help="Scale factor applied to all L>=1 SH rest bands after specular transfer (default: 2.0)")  # Gen by Cursor
+    parser.add_argument("--num_samples", type=int, default=1200, help="Fibonacci SH samples for relighting/visibility bake")
+    parser.add_argument("--shadow_res", type=int, default=1024, help="Shadow-map bake resolution")
     args = parser.parse_args()
 
     ENV_MAP_SOURCE_PATH  = args.source
@@ -458,7 +464,7 @@ if __name__ == "__main__":
     RELIGHT_OUTPUT_PATH  = args.output
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    num_samples = 1200
+    num_samples = args.num_samples
     
     print("Loading Gaussian PLY and setting up constants...")
     print(f"  Source env : {ENV_MAP_SOURCE_PATH}")
@@ -484,7 +490,7 @@ if __name__ == "__main__":
     
     with torch.no_grad():
         V_lm = phase_1_bake_visibility_sh(
-            object_gaussians, directions, A_weighted, AT_A_weighted, sqrt_weights, device, res=1024
+            object_gaussians, directions, A_weighted, AT_A_weighted, sqrt_weights, device, res=args.shadow_res
         )
         
     bake_end_time = time.time()
