@@ -48,6 +48,9 @@ def loadCam(args, id, cam_info, resolution_scale):
         loaded_mask = None
         gt_image = resized_image_rgb
 
+    if loaded_mask is None and getattr(cam_info, "alpha_image", None) is not None:
+        loaded_mask = PILtoTorch(cam_info.alpha_image, resolution)
+
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T,
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY,
                   image=gt_image, gt_alpha_mask=loaded_mask,

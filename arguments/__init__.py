@@ -94,7 +94,12 @@ class OptimizationParams(ParamGroup):
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
-        self.densify_grad_threshold = 0.0002
+        self.densify_grad_threshold = 0.0002 * 0.2
+        self.lambda_alpha = 0.05
+        self.sh_degree_up_interval = 3_000
+        self.geometry_freeze_iter = 20_000
+        self.normal_consistency_ramp_start = 7_000
+        self.normal_consistency_ramp_end = 15_000
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

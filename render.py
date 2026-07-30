@@ -33,6 +33,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--skip_mesh", action="store_true")
+    parser.add_argument("--skip_gt", action="store_true", help="Skip exporting ground-truth images")
+    parser.add_argument("--skip_vis", action="store_true", help="Skip exporting depth/normal visualization images")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--render_path", action="store_true")
     parser.add_argument("--voxel_size", default=-1.0, type=float, help='Mesh: voxel size for TSDF')
@@ -50,23 +52,28 @@ if __name__ == "__main__":
     scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
     bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-    
-    train_dir = os.path.join(args.model_path, 'train', "ours_{}".format(scene.loaded_iter))
-    test_dir = os.path.join(args.model_path, 'test', "ours_{}".format(scene.loaded_iter))
+
+    if args.ply:
+        render_name = os.path.splitext(os.path.basename(args.ply))[0]
+    else:
+        render_name = "ours_{}".format(scene.loaded_iter)
+
+    train_dir = os.path.join(args.model_path, 'train', render_name)
+    test_dir = os.path.join(args.model_path, 'test', render_name)
     gaussExtractor = GaussianExtractor(gaussians, render, pipe, bg_color=bg_color)    
     
     if not args.skip_train:
         print("export training images ...")
         os.makedirs(train_dir, exist_ok=True)
         gaussExtractor.reconstruction(scene.getTrainCameras())
-        gaussExtractor.export_image(train_dir)
+        gaussExtractor.export_image(train_dir, save_gt=not args.skip_gt, save_vis=not args.skip_vis)
         
     
     if (not args.skip_test) and (len(scene.getTestCameras()) > 0):
         print("export rendered testing images ...")
         os.makedirs(test_dir, exist_ok=True)
         gaussExtractor.reconstruction(scene.getTestCameras())
-        gaussExtractor.export_image(test_dir)
+        gaussExtractor.export_image(test_dir, save_gt=not args.skip_gt, save_vis=not args.skip_vis)
     
     
     if args.render_path:
@@ -76,7 +83,7 @@ if __name__ == "__main__":
         n_fames = 240
         cam_traj = generate_path(scene.getTrainCameras(), n_frames=n_fames)
         gaussExtractor.reconstruction(cam_traj)
-        gaussExtractor.export_image(traj_dir)
+        gaussExtractor.export_image(traj_dir, save_gt=not args.skip_gt, save_vis=not args.skip_vis)
         create_videos(base_dir=traj_dir,
                     input_dir=traj_dir, 
                     out_name='render_traj', 

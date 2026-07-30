@@ -11,11 +11,8 @@
 
 import os
 import sys
-import math
 import uuid
 import torch
-import torch.nn.functional as F
-import numpy as np
 from random import randint
 from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
@@ -26,10 +23,6 @@ from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 from utils.image_utils import psnr, render_net_image
 from arguments import ModelParams, PipelineParams, OptimizationParams
-from utils.lighting_utils import (
-    load_prior, save_debug_vis,
-    make_sh_sample_matrix, C0,
-)
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -37,27 +30,8 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-
-# ── Hyper-parameters for physical DC ─────────────────────────────────────────
-PHYSICAL_DC_START   = 5_000   # iter to switch on physical DC
-ALBEDO_UNFREEZE     = 15_000  # iter to unfreeze albedo LR
-NORMAL_PRIOR_START  = 1_000   # iter to start normal prior loss
-SOURCE_SH_LR        = 5e-4
-ALBEDO_UNFREEZE_LR  = 3e-5
-
-LAMBDA_NORMAL_PRIOR = 0.1     # normal 2D prior loss weight
-LAMBDA_ALBEDO_2D    = 0.05    # albedo 2D prior loss weight
-LAMBDA_NONNEG       = 0.01    # source_sh non-negativity
-LAMBDA_SRC_REG      = 1e-4    # source_sh L≥1 regulariser
-LAMBDA_ALB_STAB     = 0.01    # albedo stability
-
-DEBUG_VIS_ITERS     = {5000, 10000, 15000, 20000, 25000, 30000}
-PSNR_WARN_ITER      = 10_000
-PSNR_WARN_THRESH    = 27.0
-
-
 def training(dataset, opt, pipe, testing_iterations, saving_iterations,
-             checkpoint_iterations, checkpoint, sh_degree_up_interval=1000):
+             checkpoint_iterations, checkpoint):
     first_iter = 0
     tb_writer  = prepare_output_and_logger(dataset)
     gaussians  = GaussianModel(dataset.sh_degree)
@@ -75,11 +49,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
 
     train_cameras = scene.getTrainCameras()
 
-    # Precompute SH sample matrix for nonneg check (done once)
-    A_samples = make_sh_sample_matrix(256, 3, 'cuda')  # [256, 16]
-
     viewpoint_stack = None
-    ema_loss = ema_dist = ema_normal = 0.0
+    ema_loss = ema_dist = ema_normal = ema_alpha = 0.0
     psnr_history = []           # (iter, psnr) for monitoring
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training")
@@ -90,7 +61,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
         iter_start.record()
         gaussians.update_learning_rate(iteration)
 
-        if iteration % sh_degree_up_interval == 0:
+        if opt.geometry_freeze_iter > 0 and iteration >= opt.geometry_freeze_iter:
+            for param_group in gaussians.optimizer.param_groups:
+                if param_group["name"] in ("xyz", "rotation", "scaling"):
+                    param_group["lr"] = 0.0
+
+        if iteration % opt.sh_degree_up_interval == 0:
             gaussians.oneupSHdegree()
 
         # ── Pick a random camera ──────────────────────────────────────────────
@@ -112,79 +88,30 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1 - ssim(image, gt_image))
 
         # ── Vanilla 2DGS regularisers ─────────────────────────────────────────
-        lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
+        if iteration < opt.normal_consistency_ramp_start:
+            lambda_normal = 0.0
+        elif iteration < opt.normal_consistency_ramp_end:
+            progress = (iteration - opt.normal_consistency_ramp_start) / (
+                opt.normal_consistency_ramp_end - opt.normal_consistency_ramp_start)
+            lambda_normal = opt.lambda_normal * progress
+        else:
+            lambda_normal = opt.lambda_normal
         lambda_dist   = opt.lambda_dist   if iteration > 3000 else 0.0
 
         rend_dist   = render_pkg["rend_dist"]
         rend_normal = render_pkg['rend_normal']
         surf_normal = render_pkg['surf_normal']
         normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-        loss += lambda_normal * normal_error.mean()
+        normal_loss = lambda_normal * normal_error.mean()
+        loss += normal_loss
         loss += lambda_dist   * rend_dist.mean()
 
-        # ── Load prior for this camera (cached) ───────────────────────────────
-        prior = load_prior(viewpoint_cam, device='cuda')  # (alb,norm,mask) or None
-        H_img, W_img = image.shape[1], image.shape[2]
-
-        # ── Normal prior loss (starts early, seeds orientations) ──────────────
-        if prior is not None and iteration >= NORMAL_PRIOR_START:
-            gt_alb, gt_norm, gt_mask = prior
-            H_p, W_p = gt_norm.shape[1], gt_norm.shape[2]
-
-            gt_norm_r = F.interpolate(gt_norm.unsqueeze(0), (H_img, W_img),
-                                       mode='bilinear', align_corners=False)[0]
-            gt_mask_r = F.interpolate(gt_mask.unsqueeze(0), (H_img, W_img),
-                                       mode='nearest')[0]
-
-            # Taper weight: strong early, fade once physical DC takes over and
-            # the built-in normal loss is active (>7k)
-            w_np = LAMBDA_NORMAL_PRIOR if iteration < 7000 else LAMBDA_NORMAL_PRIOR * 0.1
-            cos_err = (1 - (rend_normal * gt_norm_r).sum(0, keepdim=True)).clamp(0)
-            loss += w_np * (cos_err * gt_mask_r).mean()
-
-        # ── Enable physical DC at iter 5k ─────────────────────────────────────
-        if iteration == PHYSICAL_DC_START:
-            print("\n[PhysicalDC] Initialising — using current DC colors as albedo init …")
-            # KEY: albedo_init = current Gaussian colors so dc_final = albedo × 1 = same
-            # as before → ZERO disruption to rendered appearance at transition.
-            with torch.no_grad():
-                albedo_init = gaussians.get_albedo_colors.detach()  # [N,3] sRGB
-
-            # Unit-ambient source_sh: E=1 everywhere → dc_final = albedo = original colors
-            K = (gaussians.max_sh_degree + 1) ** 2
-            source_sh_init = torch.zeros(K, 3, device='cuda')
-            source_sh_init[0] = 1.0 / (math.pi * C0)  # L00 s.t. E_DC = 1
-
-            gaussians.enable_physical_dc(albedo_init, source_sh_init,
-                                          source_sh_lr=SOURCE_SH_LR)
-
-        # ── Unfreeze albedo at iter 15k ───────────────────────────────────────
-        if iteration == ALBEDO_UNFREEZE:
-            gaussians.unfreeze_albedo(lr=ALBEDO_UNFREEZE_LR)
-
-        # ── Physical DC auxiliary losses ──────────────────────────────────────
-        if gaussians._use_physical_dc and prior is not None:
-            gt_alb, gt_norm, gt_mask = prior
-            gt_alb_r = F.interpolate(gt_alb.unsqueeze(0), (H_img, W_img),
-                                      mode='bilinear', align_corners=False)[0]
-            gt_mask_r = F.interpolate(gt_mask.unsqueeze(0), (H_img, W_img),
-                                       mode='nearest')[0]
-
-            # Albedo 2D: render _features_dc as colours, compare to GT albedo
-            alb_colors = gaussians.get_albedo_colors              # [N, 3]
-            alb_pkg    = render(viewpoint_cam, gaussians, pipe, background,
-                                override_color=alb_colors)
-            alb_render = alb_pkg['render']                         # [3, H, W]
-            loss += LAMBDA_ALBEDO_2D * (gt_mask_r *
-                                        (alb_render - gt_alb_r).abs()).mean()
-
-            # Source SH regularisers
-            src   = gaussians._source_sh
-            E_env = A_samples @ src                                # [256, 3]
-            loss += LAMBDA_NONNEG  * F.relu(-E_env).pow(2).mean()
-            loss += LAMBDA_SRC_REG * (src[1:] ** 2).mean()
-
-            # (albedo stability loss removed: _albedo_init size stale after densification)
+        alpha_loss = torch.tensor(0.0, device="cuda")
+        if viewpoint_cam.gt_alpha_mask is not None and opt.lambda_alpha > 0:
+            gt_alpha = viewpoint_cam.gt_alpha_mask.cuda()
+            rend_alpha = render_pkg["rend_alpha"]
+            alpha_loss = opt.lambda_alpha * l1_loss(rend_alpha, gt_alpha)
+            loss += alpha_loss
 
         # ── Backward ─────────────────────────────────────────────────────────
         loss.backward()
@@ -193,7 +120,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
         with torch.no_grad():
             ema_loss   = 0.4 * loss.item() + 0.6 * ema_loss
             ema_dist   = 0.4 * rend_dist.mean().item() + 0.6 * ema_dist
-            ema_normal = 0.4 * normal_error.mean().item() + 0.6 * ema_normal
+            ema_normal = 0.4 * normal_loss.item() + 0.6 * ema_normal
+            ema_alpha  = 0.4 * alpha_loss.item() + 0.6 * ema_alpha
 
             # ── Progress bar ──────────────────────────────────────────────────
             if iteration % 10 == 0:
@@ -201,6 +129,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
                     "Loss": f"{ema_loss:.4f}",
                     "dist": f"{ema_dist:.5f}",
                     "norm": f"{ema_normal:.5f}",
+                    "alpha": f"{ema_alpha:.5f}",
                     "N":    len(gaussians.get_xyz),
                 })
                 progress_bar.update(10)
@@ -213,6 +142,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
                 tb_writer.add_scalar('loss/l1',     Ll1.item(),  iteration)
                 tb_writer.add_scalar('loss/dist',   ema_dist,    iteration)
                 tb_writer.add_scalar('loss/normal', ema_normal,  iteration)
+                tb_writer.add_scalar('loss/alpha',  ema_alpha,   iteration)
 
             # ── Save & eval ───────────────────────────────────────────────────
             training_report(tb_writer, iteration, Ll1, loss, l1_loss,
@@ -222,20 +152,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
             if iteration in saving_iterations:
                 print(f"\n[ITER {iteration}] Saving Gaussians")
                 scene.save(iteration)
-
-            # ── PSNR safety check ─────────────────────────────────────────────
-            if iteration == PSNR_WARN_ITER and psnr_history:
-                recent = [p for it, p in psnr_history if it <= PSNR_WARN_ITER]
-                if recent and max(recent) < PSNR_WARN_THRESH:
-                    print(f"\n[WARNING] PSNR={max(recent):.2f} < {PSNR_WARN_THRESH} "
-                          f"at iter {PSNR_WARN_ITER}. STOPPING for diagnosis.")
-                    progress_bar.close()
-                    return  # caller can inspect and restart
-
-            # ── Debug visualisations every 5k ────────────────────────────────
-            if iteration in DEBUG_VIS_ITERS:
-                _debug_vis(dataset.model_path, iteration, render_pkg,
-                           gaussians, gt_image, viewpoint_cam, pipe, background, prior)
 
             # ── Densification ─────────────────────────────────────────────────
             if iteration < opt.densify_until_iter:
@@ -258,41 +174,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
-                if gaussians.light_optimizer is not None:
-                    gaussians.light_optimizer.step()
-                    gaussians.light_optimizer.zero_grad(set_to_none=True)
 
             if iteration in checkpoint_iterations:
                 print(f"\n[ITER {iteration}] Saving Checkpoint")
                 torch.save((gaussians.capture(), iteration),
                            scene.model_path + f"/chkpnt{iteration}.pth")
-
-
-# ── Debug visualisation helper ────────────────────────────────────────────────
-def _debug_vis(model_path, iteration, render_pkg, gaussians, gt_image,
-               viewpoint_cam, pipe, background, prior):
-    alb_render = None
-    if gaussians._use_physical_dc:
-        with torch.no_grad():
-            alb_colors = gaussians.get_albedo_colors
-            alb_pkg    = render(viewpoint_cam, gaussians, pipe, background,
-                                override_color=alb_colors)
-            alb_render = alb_pkg['render']
-
-    gt_alb  = prior[0] if prior is not None else None
-    gt_norm = prior[1] if prior is not None else None
-
-    # Resize prior maps to match image resolution if needed
-    H, W = gt_image.shape[1], gt_image.shape[2]
-    if gt_alb is not None and gt_alb.shape[1] != H:
-        gt_alb  = F.interpolate(gt_alb.unsqueeze(0),  (H, W), mode='bilinear',
-                                align_corners=False)[0]
-        gt_norm = F.interpolate(gt_norm.unsqueeze(0), (H, W), mode='bilinear',
-                                align_corners=False)[0]
-
-    save_debug_vis(model_path, iteration, render_pkg, gaussians, gt_image,
-                   gt_albedo=gt_alb, gt_normal=gt_norm, albedo_render=alb_render)
-
 
 # ── Logger & report (unchanged from vanilla) ─────────────────────────────────
 def prepare_output_and_logger(args):
@@ -379,14 +265,12 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations",       nargs="+", type=int,
-                        default=[1000, 3000, 5000, 7000, 10000, 15000, 20000, 25000, 30000])
+                        default=[7000, 30000])
     parser.add_argument("--save_iterations",       nargs="+", type=int,
-                        default=[7000, 15000, 30000])
+                        default=[7000, 30000])
     parser.add_argument("--quiet",                 action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint",      type=str,  default=None)
-    parser.add_argument("--sh_degree_up_interval", type=int,  default=1000,
-                        help="Increase active SH degree by 1 every N iterations (default: 1000)")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -395,6 +279,5 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args),
              args.test_iterations, args.save_iterations,
-             args.checkpoint_iterations, args.start_checkpoint,
-             args.sh_degree_up_interval)
+             args.checkpoint_iterations, args.start_checkpoint)
     print("\nTraining complete.")

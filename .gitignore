@@ -1,6 +1,7 @@
 *.pyc
 .vscode
 output
+logs
 build
 data
 *.ply

@@ -37,6 +37,8 @@ pip install submodules/diff-surfel-rasterization
 pip install submodules/simple-knn
 ```
 
+*Note: This code has been verified to build and run with **CUDA Toolkit 11.8**. If you encounter GCC version errors (e.g. "unsupported GNU version") during the `pip install` step, ensure you are compiling with GCC 11 or earlier by prefixing the install commands with `CC=gcc-11 CXX=g++-11`.*
+
 **Custom data**: TranSplat uses the same COLMAP / NeRF-Synthetic loaders as 3DGS/2DGS. To prepare your own COLMAP scene, see `convert.py` and the [3DGS data prep instructions](https://github.com/graphdeco-inria/gaussian-splatting?tab=readme-ov-file#processing-your-own-scenes).
 
 ## Training
@@ -54,9 +56,10 @@ Commandline arguments for regularization:
 ```bash
 --lambda_normal              # hyperparameter for normal consistency
 --lambda_dist                # hyperparameter for depth distortion
+--lambda_alpha               # RGBA mask / opacity supervision for synthetic RGBA data
 --depth_ratio                # 0 for mean depth, 1 for median depth (0 works for most cases)
 --sh_degree                  # max SH degree (default: 3)
---sh_degree_up_interval      # increase active SH degree by 1 every N iterations (default: 1000)
+--sh_degree_up_interval      # increase active SH degree by 1 every N iterations (default: 3000)
 ```
 Higher final SH quality on glossy/specular objects (important for relighting) generally benefits from a higher `--sh_degree` paired with a longer `--sh_degree_up_interval`, e.g.:
 ```bash
@@ -66,7 +69,9 @@ python train.py -s <dataset> -m <output dir> \
 ```
 **Trade-off:** increasing `--sh_degree` improves relight quality — especially specular highlights — since TranSplat's specular transfer operates directly on the higher-order SH bands, but it also increases per-Gaussian storage and rendering cost, lowering FPS. See the paper for a detailed quality/speed analysis.
 
-The rest of the physically-based DC/albedo prior schedule (used to keep SH coefficients shadow-free and relight-ready) is controlled by constants near the top of `train.py` for advanced tuning.
+For RGBA synthetic datasets, the loader preserves the alpha channel as a training mask. The default `--lambda_alpha 0.05` supervises rendered opacity against that mask, which suppresses outside-object floaters and keeps relit renders exportable as RGBA.
+
+The vanilla training defaults follow the relighting-ready setup used for the released examples: active SH degree advances every 3000 iterations, the 2DGS normal-consistency loss ramps from iteration 7000 to 15000, geometry is frozen after iteration 20000, and densification uses a lower gradient threshold to preserve sufficient surfels for relighting. Prior-based DC/albedo decomposition is not used by default.
 
 ## Relighting
 
@@ -117,6 +122,8 @@ or
 ```bash
 scripts/run_transplat.sh render -s <dataset> -m <model dir> --ply <relit.ply> --skip-mesh
 ```
+
+When `--ply` is provided, renders are written under a folder named after that PLY, e.g. `train/relit_fireplace/renders`, so relit renders do not overwrite the trained checkpoint renders. Use `--skip_gt` and `--skip_vis` to export only render PNGs; RGBA-trained models write RGBA PNGs by default.
 
 Meshing arguments (same as upstream 2DGS):
 ```bash

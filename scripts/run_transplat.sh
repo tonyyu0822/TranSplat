@@ -21,6 +21,7 @@ set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_NAME="$(basename "$0")"
+PYTHON_BIN="${PYTHON:-python3}"
 
 # ---------------------------------------------------------------------------
 # Stage runner: prints a banner, runs the command, and reports OK/FAILED.
@@ -118,7 +119,7 @@ Usage: run_transplat.sh train -s <dataset> -m <output dir> [options] [-- <extra 
   -m, --model-path PATH         Output model directory                         [required]
       --gpu N                   CUDA_VISIBLE_DEVICES value (default: 0)
       --sh-degree N             Max SH degree
-      --sh-degree-up-interval N Increase active SH degree every N iters (default: 1000)
+      --sh-degree-up-interval N Increase active SH degree every N iters (default: 3000)
       --lambda-normal F         Normal consistency loss weight
       --lambda-dist F           Depth distortion loss weight
   -- ...                        Extra args forwarded verbatim to train.py
@@ -138,7 +139,7 @@ EOF
     [[ ${#EXTRA_ARGS[@]} -gt 0 ]] && args+=("${EXTRA_ARGS[@]}")
 
     check_conda_env
-    CUDA_VISIBLE_DEVICES="${gpu}" python "${REPO_DIR}/train.py" "${args[@]}"
+    CUDA_VISIBLE_DEVICES="${gpu}" "${PYTHON_BIN}" "${REPO_DIR}/train.py" "${args[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -199,7 +200,7 @@ EOF
     [[ ${#EXTRA_ARGS[@]} -gt 0 ]] && args+=("${EXTRA_ARGS[@]}")
 
     check_conda_env
-    CUDA_VISIBLE_DEVICES="${gpu}" python "${REPO_DIR}/radiance_transfer_TranSplat.py" "${args[@]}"
+    CUDA_VISIBLE_DEVICES="${gpu}" "${PYTHON_BIN}" "${REPO_DIR}/radiance_transfer_TranSplat.py" "${args[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -255,7 +256,7 @@ EOF
     [[ ${#EXTRA_ARGS[@]} -gt 0 ]] && args+=("${EXTRA_ARGS[@]}")
 
     check_conda_env
-    CUDA_VISIBLE_DEVICES="${gpu}" python "${REPO_DIR}/render.py" "${args[@]}"
+    CUDA_VISIBLE_DEVICES="${gpu}" "${PYTHON_BIN}" "${REPO_DIR}/render.py" "${args[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -303,7 +304,7 @@ EOF
     [[ ${#EXTRA_ARGS[@]} -gt 0 ]] && args+=("${EXTRA_ARGS[@]}")
 
     check_conda_env
-    python "${REPO_DIR}/scripts/render_directional_visibility.py" "${args[@]}"
+    "${PYTHON_BIN}" "${REPO_DIR}/scripts/render_directional_visibility.py" "${args[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -354,7 +355,7 @@ EOF
     [[ ${#EXTRA_ARGS[@]} -gt 0 ]] && args+=("${EXTRA_ARGS[@]}")
 
     check_conda_env
-    python "${REPO_DIR}/scripts/make_rotating_light_demo.py" "${args[@]}"
+    "${PYTHON_BIN}" "${REPO_DIR}/scripts/make_rotating_light_demo.py" "${args[@]}"
 }
 
 # ---------------------------------------------------------------------------

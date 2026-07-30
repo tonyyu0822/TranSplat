@@ -217,9 +217,10 @@ def save_debug_vis(output_dir: str, iteration: int,
     if gt_normal  is not None: _save('gt_normal',  (gt_normal + 1) * 0.5)
     if albedo_render is not None: _save('pred_albedo', albedo_render)
 
-    # Source SH preview (env map thumbnail)
-    if gaussians._use_physical_dc and gaussians._source_sh.numel() > 0:
-        _write_sh_preview(gaussians._source_sh.detach(),
+    # Source SH preview for older checkpoints that carried physical-DC state.
+    source_sh = getattr(gaussians, "_source_sh", None)
+    if getattr(gaussians, "_use_physical_dc", False) and source_sh is not None and source_sh.numel() > 0:
+        _write_sh_preview(source_sh.detach(),
                           os.path.join(vis_dir, f'iter{iteration:05d}_source_sh_env.png'))
 
     print(f'[vis] saved iter {iteration} → {vis_dir}')
