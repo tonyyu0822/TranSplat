@@ -192,14 +192,14 @@ This project is built upon [2D Gaussian Splatting](https://github.com/hbb1/2d-ga
 
 ## Citation
 If you find TranSplat useful for your work, please consider citing:
+<!-- Gen by Cursor -->
 ```bibtex
-@misc{yu2025transplatinstantcrosssceneobject,
-      title={TranSplat: Instant Cross-Scene Object Relighting in Gaussian Splatting via Spherical Harmonic Transfer},
-      author={Boyang Yu and Yanlin Jin and Yun He and Akshat Dave and Ravi Ramamoorthi and Guha Balakrishnan},
-      year={2025},
-      eprint={2503.22676},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2503.22676},
+@inproceedings{yu2026transplat,
+  title={TranSplat: Instant Object Relighting in Gaussian Splatting via Spherical Harmonic Radiance Transfer},
+  author={Yu, Boyang Tony and Jin, Yanlin and He, Yun and Dave, Akshat and Ramamoorthi, Ravi and Balakrishnan, Guha},
+  booktitle={2026 IEEE International Conference on Computational Photography (ICCP)},
+  pages={1--10},
+  year={2026},
+  organization={IEEE}
 }
 ```
